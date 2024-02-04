@@ -82,3 +82,61 @@ module Particle_filter = struct
     let logits = Array.map (fun p -> p.score) particles in
     Distribution.support ~values ~logits
 end
+
+module Metropolis_hastings = struct
+  type 'a prob = {
+    score : float;
+    trace : 'a sample_site list;
+    value : 'a option;
+  }
+
+  and 'a sample_site =
+    | Sample : {
+        k : 'b -> 'a next;
+        score : float;
+        dist : 'b Distribution.t;
+      }
+        -> 'a sample_site
+
+  and 'a next = 'a prob -> 'a prob
+  and ('a, 'b) model = 'a -> ('b -> 'b next) -> 'b next
+
+  let sample dist k prob =
+    let value = Distribution.draw dist in
+    let sample_site = Sample { k; score = prob.score; dist } in
+    k value { prob with trace = sample_site :: prob.trace }
+
+  let factor s k prob = k () { prob with score = prob.score +. s }
+  let assume p k prob = factor (if p then 0. else -.infinity) k prob
+  let observe d x k prob = factor (Distribution.logpdf d x) k prob
+  let exit v prob = { prob with value = Some v }
+
+  let mh prob prob' =
+    let fw = -.log (prob.trace |> List.length |> Float.of_int) in
+    let bw = -.log (prob'.trace |> List.length |> Float.of_int) in
+    min 1. (exp (prob'.score -. prob.score +. bw -. fw))
+
+  let rec gen n values prob =
+    if n = 0 then values
+    else
+      let regen_from = Random.int (List.length prob.trace) in
+      (* pick regen point *)
+      let (Sample regen) = List.nth prob.trace regen_from in
+      (* compute new proposal *)
+      let prob' =
+        sample regen.dist regen.k
+          {
+            prob with
+            score = regen.score;
+            trace = Utils.slice prob.trace regen_from;
+          }
+      in
+      (* accept / reject proposal *)
+      let next_prob = if Random.float 1. < mh prob prob' then prob' else prob in
+      gen (n - 1) (Option.get next_prob.value :: values) next_prob
+
+  let infer ?(n = 1000) m data =
+    let prob = (m data) exit { score = 0.; trace = []; value = None } in
+    let values = gen n [] prob |> Array.of_list in
+    Distribution.uniform_support ~values
+end
